@@ -16,10 +16,12 @@ import org.acme.party.hero.Hero;
 import org.acme.party.hero.HeroClient;
 import org.acme.party.model.BattleRequest;
 import org.acme.party.model.FightRequest;
+import org.acme.party.model.HealRequest;
 import org.eclipse.microprofile.reactive.messaging.Channel;
 import org.eclipse.microprofile.reactive.messaging.Emitter;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.random.RandomGenerator;
 
 import static io.smallrye.mutiny.Uni.createFrom;
@@ -29,6 +31,9 @@ import static org.acme.party.model.Armory.*;
 @Path("party")
 @Produces(MediaType.APPLICATION_JSON)
 public class PartyMemberResource {
+
+    Map<String, List<String>> lastArmourMap = new ConcurrentHashMap<>();
+    Map<String, List<String>> lastWeaponMap = new ConcurrentHashMap<>();
 
     @Inject
     @Channel("battles-request") // imperative messaging
@@ -44,7 +49,7 @@ public class PartyMemberResource {
     }
 
     /**
-     * Creates and persists a new {@link PartyMember} entity with randomized weapon and armor,
+     * d persists a new {@link PartyMember} entity with randomized weapon and armor,
      * assigning the user ID of the current user or "anonymous" if there is no user context.
      * Logs the creation of the party member upon successful persistence.
      *
@@ -52,6 +57,7 @@ public class PartyMemberResource {
      *                    with a user ID, randomly chosen weapon, and armor before persisting.
      * @return a {@link Uni} object containing the persisted {@link PartyMember} entity upon
      * successful completion.
+     * Creates an
      */
     @Consumes(MediaType.APPLICATION_JSON)
     @POST
@@ -61,8 +67,8 @@ public class PartyMemberResource {
         partyMember.userId = context.getUserPrincipal() != null ?
                 context.getUserPrincipal().getName() : "anonymous";
 
-        partyMember.setArmour(getArmour());
-        partyMember.setWeapon(getWeapon());
+        partyMember.setArmour(getArmour(partyMember.userId));
+        partyMember.setWeapon(getWeapon(partyMember.userId));
         partyMember.setLevel(1);
 
         return partyMember.<PartyMember>persist().onItem()
@@ -87,6 +93,9 @@ public class PartyMemberResource {
     @Path("remove-user-parties")
     public Uni<Void> removeUserParties(final String userId) {
 
+        lastArmourMap.put(userId, new ArrayList<>());
+        lastWeaponMap.put(userId, new ArrayList<>());
+
         Log.info("release parties for user id: " + userId);
 
         String currentUserId = context.getUserPrincipal() != null ?
@@ -110,6 +119,45 @@ public class PartyMemberResource {
                 ).discardItems()
         );
     }
+
+    @PUT
+    @WithTransaction
+    @Path("heal")
+    public Uni<Response> heal(final HealRequest healRequest) {
+        if (healRequest == null || healRequest.getGameId() == null) {
+            return Uni.createFrom().item(
+                    Response.status(Response.Status.BAD_REQUEST).entity("Invalid heal request").build()
+            );
+        }
+
+        return Game.<Game>findById(healRequest.getGameId())
+                .onItem().ifNotNull().transformToUni(game -> {
+                    if (healRequest.getHealAll()) {
+                        // Heal all PartyMembers in the game
+                        return PartyMember
+                                .update("health = health + 20 WHERE userId = ?1 AND health < 50", game.getUserId())
+                                .onItem().transform(updated -> Response.ok("All members of the party healed").build());
+                    } else {
+                        if (healRequest.getPartyMemberId() == null) {
+                            return Uni.createFrom().item(
+                                    Response.status(Response.Status.BAD_REQUEST).entity("PartyMemberId is required when healAll is false").build()
+                            );
+                        }
+                        // Heal the specific PartyMember
+                        return PartyMember
+                                .update("health = health + 10 WHERE id = ?1 ", healRequest.getPartyMemberId())
+                                .onItem().transform(updated -> {
+                                    if (updated > 0) {
+                                        return Response.ok("Party member healed").build();
+                                    } else {
+                                        return Response.status(Response.Status.NOT_FOUND).entity("Party member not found or does not belong to the game").build();
+                                    }
+                                });
+                    }
+                })
+                .onItem().ifNull().continueWith(() -> Response.status(Response.Status.NOT_FOUND).entity("Game not found").build());
+    }
+
 
     /**
      * Toggles the fighting status of a party member based on the provided FightRequest.
@@ -239,9 +287,26 @@ public class PartyMemberResource {
      * @return a randomly selected weapon as a {@code String}. The weapon is chosen
      * from the current list of available weapons.
      */
-    private String getWeapon() {
+    private String getWeapon(String userId) {
+        List<String> lastWeapons = lastWeaponMap.get(userId);
         int index = RandomGenerator.getDefault().nextInt(WEAPONS.length);
-        return WEAPONS[index];
+        String weapon = null;
+        if (lastWeapons != null) {
+            int i = 0;
+            while (i < WEAPONS.length) {
+                if (!lastWeapons.contains(WEAPONS[index])) {
+                    weapon = WEAPONS[index];
+                    lastWeapons.add(weapon);
+                    break;
+                }
+                index = (index + 1) % WEAPONS.length;
+                i++;
+            }
+        } else {
+            weapon = WEAPONS[index];
+            lastWeaponMap.put(userId, new ArrayList<>(List.of(weapon)));
+        }
+        return weapon;
     }
 
     /**
@@ -249,8 +314,25 @@ public class PartyMemberResource {
      *
      * @return a randomly chosen armour as a {@code String} from the predefined list of armours.
      */
-    private String getArmour() {
+    private String getArmour(String userId) {
+        List<String> lastArmours = lastArmourMap.get(userId);
         int index = RandomGenerator.getDefault().nextInt(ARMOURS.length);
-        return ARMOURS[index];
+        String armour = null;
+        if (lastArmours != null) {
+            int i = 0;
+            while (i < ARMOURS.length) {
+                if (!lastArmours.contains(ARMOURS[index])) {
+                    armour = ARMOURS[index];
+                    lastArmours.add(armour);
+                    break;
+                }
+                index = (index + 1) % ARMOURS.length;
+                i++;
+            }
+        } else {
+            armour = ARMOURS[index];
+            lastArmourMap.put(userId, new ArrayList<>(List.of(armour)));
+        }
+        return armour;
     }
 }

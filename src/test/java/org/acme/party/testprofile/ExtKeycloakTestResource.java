@@ -8,7 +8,7 @@ import java.util.Map;
 public class ExtKeycloakTestResource implements QuarkusTestResourceLifecycleManager {
 
 
-    private String KEYCLOAK_PORT = "7777";// ---- CAMBIARE CON LA PORTA DEL KC esterno ----
+    private String KEYCLOAK_PORT = "7777";// ----  PORTA DEL KC esterno ----
 
     @Override
     public Map<String, String> start() {

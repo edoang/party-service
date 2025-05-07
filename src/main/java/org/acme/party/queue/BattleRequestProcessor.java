@@ -97,31 +97,51 @@ public class BattleRequestProcessor {
             Long partyMemberId = battleEnd.partyMember.id;
             Long gameId = battleEnd.gameId != null ? battleEnd.gameId : null;
 
-            // Trova e aggiorna il PartyMember
-            return PartyMember.findById(partyMemberId)
-                    .onItem().ifNotNull().transformToUni(partyMember -> {
-                        PartyMember p = (PartyMember) partyMember;
-                        p.fighting = false;
-                        p.villain = null;
-                        p.health = battleEnd.partyMember.health;
-
-                        updateMemberLevel(p);
-
-                        return p.persist()
-                                .replaceWith(gameId != null
-                                        ? Game.findById(gameId) // Trova e aggiorna il Game (se necessario)
-                                        .onItem().ifNotNull().invoke(game -> {
-                                            Game g = (Game) game;
-                                            if (battleEnd.isVictory) {
-                                                g.won++;
-                                            } else {
-                                                g.lost++;
-                                            }
-                                            g.persist();
-                                        })
-                                        .onItem().ifNull().failWith(() -> new IllegalStateException("Game with ID " + gameId + " not found"))
-                                        : Uni.createFrom().nullItem());
+            return Uni.createFrom().voidItem()
+                    .flatMap(voidItem -> {
+                        if (!battleEnd.isVictory) {
+                            Log.info("Applying health reduction for all party members...");
+                            return PartyMember.update("health = health - 10 WHERE health > 20 and userId = ?1 AND id != ?2",
+                                            battleEnd.partyMember.userId, partyMemberId)
+                                    .onItem().invoke(updated -> {
+                                        if (updated == 0) {
+                                            Log.warn("No party members were updated.");
+                                        } else {
+                                            Log.info("Updated health for " + updated + " party members.");
+                                        }
+                                    })
+                                    .onFailure().invoke(throwable -> {
+                                        Log.error("Error updating party members' health.", throwable);
+                                    });
+                        }
+                        return Uni.createFrom().voidItem();
                     })
+                    .flatMap(voidItem -> PartyMember.findById(partyMemberId)
+
+                            //return PartyMember.findById(partyMemberId)
+                            .onItem().ifNotNull().transformToUni(partyMember -> {
+                                PartyMember p = (PartyMember) partyMember;
+                                p.fighting = false;
+                                p.villain = null;
+                                p.health = battleEnd.partyMember.health;
+
+                                updateMemberLevel(p);
+
+                                return p.persist()
+                                        .replaceWith(gameId != null
+                                                ? Game.findById(gameId) // Trova e aggiorna il Game (se necessario)
+                                                .onItem().ifNotNull().invoke(game -> {
+                                                    Game g = (Game) game;
+                                                    if (battleEnd.isVictory) {
+                                                        g.won++;
+                                                    } else {
+                                                        g.lost++;
+                                                    }
+                                                    g.persist();
+                                                })
+                                                .onItem().ifNull().failWith(() -> new IllegalStateException("Game with ID " + gameId + " not found"))
+                                                : Uni.createFrom().nullItem());
+                            }))
                     .onItem().transform(ignored -> {
                         BattleUpdate update = new BattleUpdate();
                         update.setUser(battleEnd.partyMember.userId);
